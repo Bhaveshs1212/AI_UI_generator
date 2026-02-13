@@ -184,7 +184,7 @@ function renderJsxElement(node: JSXElement, errors: string[]): React.ReactNode {
 		return null;
 	}
 
-	const component = componentMap[nameNode.name as keyof typeof componentMap];
+	const component = componentMap[nameNode.name as keyof typeof componentMap] as React.ElementType;
 	if (!component) {
 		errors.push(`Unknown component: ${nameNode.name}.`);
 		return null;
