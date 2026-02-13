@@ -256,7 +256,7 @@ function normalizePlan(value: unknown): Plan | null {
 					}
 
 					const item = change as PlanChange;
-					const componentType = normalizeComponentType(item.componentType);
+					const componentType = normalizeComponentType(item.componentType) ?? undefined;
 					return {
 						id: item.id ?? "",
 						type: item.type as PlanChange["type"],
