@@ -3,9 +3,10 @@ import type {
 	ArrayExpression,
 	Expression,
 	JSXAttribute,
-	JSXChild,
 	JSXExpressionContainer,
 	JSXIdentifier,
+	JSXElement,
+	JSXFragment,
 	JSXOpeningElement,
 } from "@babel/types";
 import {
@@ -33,12 +34,18 @@ interface EvaluatedValue {
 	value: unknown;
 }
 
-function isMeaningfulChild(child: JSXChild): boolean {
+type JsxChildNode = JSXElement["children"][number] | JSXFragment["children"][number];
+
+function isMeaningfulChild(child: JsxChildNode): boolean {
 	if (child.type === "JSXText") {
 		return child.value.trim().length > 0;
 	}
 
-	return child.type !== "JSXEmptyExpression";
+	if (child.type === "JSXExpressionContainer") {
+		return child.expression.type !== "JSXEmptyExpression";
+	}
+
+	return true;
 }
 
 function getJsxName(node: JSXOpeningElement): string | null {
@@ -166,7 +173,7 @@ function evalAttributeValue(
 
 export function validateJsx(code: string): JsxValidationResult {
 	const errors: string[] = [];
-	const allowed = new Set(ALLOWED_COMPONENTS);
+	const allowed = new Set<string>(ALLOWED_COMPONENTS);
 	let componentCheck = true;
 	let propCheck = true;
 
