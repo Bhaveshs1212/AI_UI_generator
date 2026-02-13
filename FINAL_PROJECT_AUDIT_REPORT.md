@@ -12,19 +12,21 @@ Iteration Handling: PASS
 Safety & Validation: PASS
 UI Requirements: PASS
 API Structure: PASS
-Deployment: FAIL
+Deployment: PASS
 README Completeness: PASS
 Demo Readiness: FAIL
 
 OVERALL READINESS: NOT READY
 
 CRITICAL GAPS:
-- Deployment requirement not satisfied. No public URL or production verification yet.
 - Demo video not recorded and verified.
 
 NON-CRITICAL IMPROVEMENTS:
 - Add a short note on rate limit handling and operational limits in README.
 - Consider persisting version history and session data for production use.
+
+DEPLOYMENT:
+- Production URL: https://ai-ui-generator-amber.vercel.app
 
 DETERMINISM STRESS TEST RESULTS:
 - PASS for all five tests. See DETERMINISM_STRESS_TEST.md.
