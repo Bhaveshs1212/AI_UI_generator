@@ -47,7 +47,11 @@ function isMeaningfulChild(child: JsxChildNode): boolean {
 		return child.value.trim().length > 0;
 	}
 
-	return child.type !== "JSXEmptyExpression";
+	if (child.type === "JSXExpressionContainer") {
+		return child.expression.type !== "JSXEmptyExpression";
+	}
+
+	return true;
 }
 
 function getAttributeName(attr: JSXAttribute): string {
