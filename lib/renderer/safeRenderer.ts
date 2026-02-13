@@ -4,7 +4,6 @@ import type {
 	ArrayExpression,
 	Expression,
 	JSXAttribute,
-	JSXChild,
 	JSXElement,
 	JSXExpressionContainer,
 	JSXFragment,
@@ -41,7 +40,9 @@ export interface SafeRenderResult {
 	validation: JsxValidationResult;
 }
 
-function isMeaningfulChild(child: JSXChild): boolean {
+type JsxChildNode = JSXElement["children"][number] | JSXFragment["children"][number];
+
+function isMeaningfulChild(child: JsxChildNode): boolean {
 	if (child.type === "JSXText") {
 		return child.value.trim().length > 0;
 	}
