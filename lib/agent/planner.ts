@@ -248,7 +248,7 @@ function normalizePlan(value: unknown): Plan | null {
 				.filter((component): component is PlanComponent => component !== null)
 		: [];
 
-	const changes = Array.isArray(candidate.changes)
+	const changes: PlanChange[] = Array.isArray(candidate.changes)
 		? candidate.changes
 				.map((change) => {
 					if (!change || typeof change !== "object") {
@@ -264,7 +264,7 @@ function normalizePlan(value: unknown): Plan | null {
 						props: componentType ? normalizeProps(componentType, item.props) : item.props,
 					} satisfies PlanChange;
 				})
-				.filter((change): change is PlanChange => change !== null)
+				.filter((change): change is NonNullable<typeof change> => change !== null)
 		: [];
 
 	return {
