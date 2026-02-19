@@ -1206,7 +1206,15 @@ function parsePlan(raw: string): Plan {
 	try {
 		parsed = JSON.parse(stripCodeFences(raw));
 	} catch (error) {
-		throw new PlannerError("Planner returned invalid JSON.", "invalid_json");
+		const extracted = extractJsonObject(stripCodeFences(raw));
+		if (!extracted) {
+			throw new PlannerError("Planner returned invalid JSON.", "invalid_json");
+		}
+		try {
+			parsed = JSON.parse(extracted);
+		} catch {
+			throw new PlannerError("Planner returned invalid JSON.", "invalid_json");
+		}
 	}
 
 	const normalized = normalizePlan(parsed);
@@ -1222,6 +1230,34 @@ function parsePlan(raw: string): Plan {
 	}
 
 	return parsed;
+}
+
+function extractJsonObject(value: string): string | null {
+	const start = value.indexOf("{");
+	if (start < 0) {
+		return null;
+	}
+
+	let depth = 0;
+	let end = -1;
+	for (let i = start; i < value.length; i += 1) {
+		const char = value[i];
+		if (char === "{") {
+			depth += 1;
+		} else if (char === "}") {
+			depth -= 1;
+			if (depth === 0) {
+				end = i;
+				break;
+			}
+		}
+	}
+
+	if (end < 0) {
+		return null;
+	}
+
+	return value.slice(start, end + 1);
 }
 
 export function applyPlanChanges(previousPlan: Plan, plan: Plan): Plan {
