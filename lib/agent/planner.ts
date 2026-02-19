@@ -948,25 +948,40 @@ function normalizeDataModel(value: unknown): DataModel | null {
 						? table.columns.filter((entry) => typeof entry === "string")
 						: [],
 					rows: Array.isArray(table.rows)
-						? table.rows.filter((row) => isRecord(row))
-						: [],
+						? table.rows
+								.filter((row) => isRecord(row))
+								.map((row) => {
+									const normalized: Record<string, string | number> = {};
+									for (const [key, value] of Object.entries(row)) {
+										if (typeof value === "string" || typeof value === "number") {
+											normalized[key] = value;
+										}
+									}
+									return normalized;
+								})
+								.filter((row) => Object.keys(row).length > 0)
+							: [],
 				}))
 				.filter((table) => table.id && table.columns.length > 0)
 		: [];
 
-	const charts = Array.isArray(value.charts)
+	const charts: DataModel["charts"] = Array.isArray(value.charts)
 		? value.charts
 				.filter((chart) => isRecord(chart))
-				.map((chart) => ({
-					id: typeof chart.id === "string" ? chart.id : "",
-					type: chart.type === "line" || chart.type === "bar" ? chart.type : "line",
-					labels: Array.isArray(chart.labels)
-						? chart.labels.filter((entry) => typeof entry === "string")
-						: [],
-					values: Array.isArray(chart.values)
-						? chart.values.filter((entry) => typeof entry === "number")
-						: [],
-				}))
+				.map((chart) => {
+					const type: DataModel["charts"][number]["type"] =
+						chart.type === "bar" ? "bar" : "line";
+					return {
+						id: typeof chart.id === "string" ? chart.id : "",
+						type,
+						labels: Array.isArray(chart.labels)
+							? chart.labels.filter((entry) => typeof entry === "string")
+							: [],
+						values: Array.isArray(chart.values)
+							? chart.values.filter((entry) => typeof entry === "number")
+							: [],
+					};
+				})
 				.filter((chart) => chart.id && chart.values.length > 0)
 		: [];
 
