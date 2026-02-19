@@ -24,6 +24,22 @@ interface ChatCompletionResponse {
   }>;
 }
 
+function parseRetryAfterSeconds(message: string): number | null {
+  const match = message.match(/try again in\s*([0-9.]+)s/iu);
+  if (!match) {
+    return null;
+  }
+
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function extractOutputText(response: OpenAIResponse): string {
   if (response.output_text) {
     return response.output_text;
@@ -60,29 +76,71 @@ export function createOpenAIClient(options: OpenAIClientOptions): AgentClient {
       const endpoint = useChatCompletions
         ? `${options.baseUrl}/chat/completions`
         : `${options.baseUrl}/responses`;
+      const fallbackModel =
+        process.env.OPENAI_FALLBACK_MODEL?.trim() || "gpt-4o";
 
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${options.apiKey}`,
-        },
-        body: JSON.stringify(
-          useChatCompletions
-            ? {
-                model: options.model,
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0,
-                stream: false,
-              }
-            : {
-                model: options.model,
-                input: prompt,
-                temperature: 0,
-                top_p: 1,
-              }
-        ),
-      });
+      const buildPayload = (model: string) =>
+        useChatCompletions
+          ? {
+              model,
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0,
+              stream: false,
+            }
+          : {
+              model,
+              input: prompt,
+              temperature: 0,
+              top_p: 1,
+            };
+
+      const sendRequest = async (model: string) => {
+        return fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${options.apiKey}`,
+          },
+          body: JSON.stringify(buildPayload(model)),
+        });
+      };
+
+      const maxRetries = Number(process.env.OPENAI_MAX_RETRIES ?? "2");
+      const minWaitMs = 1000;
+      const requestWithRetry = async (model: string) => {
+        let attempt = 0;
+        while (true) {
+          const response = await sendRequest(model);
+          if (response.ok) {
+            return response;
+          }
+
+          if (response.status === 429 && attempt < maxRetries) {
+            const text = await response.text();
+            const retryAfterSeconds = parseRetryAfterSeconds(text);
+            const waitMs = Math.max(
+              minWaitMs,
+              Math.ceil((retryAfterSeconds ?? 1.5) * 1000)
+            );
+            await sleep(waitMs);
+            attempt += 1;
+            continue;
+          }
+
+          return response;
+        }
+      };
+
+      let response = await requestWithRetry(options.model);
+
+      if (!response.ok && response.status === 404 && options.model !== fallbackModel) {
+        const text = await response.text();
+        if (text.includes("model_not_found")) {
+          response = await requestWithRetry(fallbackModel);
+        } else {
+          throw new Error(`OpenAI error (${response.status}): ${text}`);
+        }
+      }
 
       if (!response.ok) {
         const text = await response.text();

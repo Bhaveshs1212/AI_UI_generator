@@ -1,4 +1,4 @@
-import type { Plan } from "../../types/plan";
+import type { Plan, PlanComponent } from "../../types/plan";
 import { buildGeneratorPrompt, stripCodeFences } from "./prompts";
 import type { AgentClient } from "./planner";
 import {
@@ -163,9 +163,26 @@ function buildComponentJsx(component: AllowedComponent, id: string, props: Recor
 }
 
 export function buildDeterministicJsx(plan: Plan): string {
-	const components = plan.components.filter((component) =>
+	const allowedComponents = plan.components.filter((component) =>
 		ALLOWED_COMPONENTS.includes(component.type)
 	);
+	const components = plan.layoutPlan?.sections?.length
+		? (() => {
+			const byId = new Map(allowedComponents.map((component) => [component.id, component]));
+			const ordered: PlanComponent[] = [];
+			for (const section of plan.layoutPlan.sections) {
+				for (const componentId of section.components) {
+					const match = byId.get(componentId);
+					if (match) {
+						ordered.push(match);
+						byId.delete(componentId);
+					}
+				}
+			}
+			ordered.push(...byId.values());
+			return ordered;
+		})()
+		: allowedComponents;
 
 	const rendered = components.map((component) =>
 		buildComponentJsx(

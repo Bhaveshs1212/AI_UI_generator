@@ -84,7 +84,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         payload
       );
 
-      if (!response.success || !response.plan || !response.code || !response.explanation || !response.version) {
+      if (!response.success || !response.plan || !response.code || !response.version) {
         set({
           isLoading: false,
           error: response.error || "Generation failed.",
@@ -93,6 +93,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         return;
       }
 
+      const explanation = response.explanation ?? "";
+
       const nextIndex = get().versions.length;
       const version: UiVersion = {
         id: response.version.id,
@@ -100,7 +102,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         timestamp: response.version.timestamp,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
       };
 
       const versions = [...get().versions, version];
@@ -109,7 +111,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         currentVersionIndex: nextIndex,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
         lastSuccessfulMessage: userMessage,
         validation: response.validation ?? null,
         isLoading: false,
@@ -138,7 +140,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         payload
       );
 
-      if (!response.success || !response.plan || !response.code || !response.explanation || !response.version) {
+      if (!response.success || !response.plan || !response.code || !response.version) {
         set({
           isLoading: false,
           error: response.error || "Regeneration failed.",
@@ -147,6 +149,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         return;
       }
 
+      const explanation = response.explanation ?? "";
+
       const nextIndex = get().versions.length;
       const version: UiVersion = {
         id: response.version.id,
@@ -154,7 +158,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         timestamp: response.version.timestamp,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
       };
 
       const versions = [...get().versions, version];
@@ -163,7 +167,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         currentVersionIndex: nextIndex,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
         lastSuccessfulMessage: message,
         validation: response.validation ?? null,
         isLoading: false,
@@ -206,7 +210,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         payload
       );
 
-      if (!response.success || !response.plan || !response.code || !response.explanation || !response.version) {
+      if (!response.success || !response.plan || !response.code || !response.version) {
         set({
           isLoading: false,
           error: response.error || "Modification failed.",
@@ -215,6 +219,8 @@ export const useUiStore = create<UiState>((set, get) => ({
         return;
       }
 
+      const explanation = response.explanation ?? "";
+
       const nextIndex = versions.length;
       const version: UiVersion = {
         id: response.version.id,
@@ -222,7 +228,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         timestamp: response.version.timestamp,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
       };
 
       const nextVersions = [...versions, version];
@@ -231,7 +237,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         currentVersionIndex: nextIndex,
         plan: response.plan,
         code: response.code,
-        explanation: response.explanation,
+        explanation,
         lastSuccessfulMessage: userMessage,
         validation: response.validation ?? null,
         isLoading: false,

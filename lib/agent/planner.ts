@@ -1,4 +1,16 @@
-import type { Plan, PlanChange, PlanComponent, PlanType } from "../../types/plan";
+import type {
+	DataModel,
+	DomainAnalysis,
+	IntentAnalysis,
+	IntentType,
+	LayoutPlan,
+	LayoutSectionType,
+	Plan,
+	PlanChange,
+	PlanComponent,
+	PlanType,
+	ReasoningOutput,
+} from "../../types/plan";
 import { buildPlannerPrompt, stripCodeFences } from "./prompts";
 import {
 	ALLOWED_COMPONENTS,
@@ -13,6 +25,7 @@ export interface AgentClient {
 export interface PlannerRequest {
 	userMessage: string;
 	previousPlan?: Plan | null;
+	reasoning?: ReasoningOutput | null;
 }
 
 export interface PlannerResult {
@@ -56,10 +69,539 @@ function buildDefaultProps(componentType: PlanComponent["type"], id: string): Re
 	}
 }
 
-function buildHeuristicPlan(userMessage: string, previousPlan?: Plan | null): Plan {
+function inferIntentAnalysis(userMessage: string): IntentAnalysis {
 	const message = userMessage.toLowerCase();
-	const layout = message.includes("dashboard") ? "dashboard" : "basic";
+	let intentType: IntentType = "dashboard";
+
+	if (
+		message.includes("home page") ||
+		message.includes("homepage") ||
+		message.includes("website") ||
+		message.includes("landing page")
+	) {
+		intentType = "marketing_page";
+	} else if (message.includes("report") || message.includes("ads") || message.includes("analytics")) {
+		intentType = "report";
+	} else if (message.includes("form") || message.includes("sign up") || message.includes("input")) {
+		intentType = "form";
+	} else if (message.includes("marketing") || message.includes("landing") || message.includes("hero")) {
+		intentType = message.includes("page") ? "marketing_page" : "marketing";
+	} else if (message.includes("crud") || message.includes("table") || message.includes("list")) {
+		intentType = "crud";
+	}
+
+	let complexity: IntentAnalysis["complexity"] = "moderate";
+	if (message.includes("simple") || message.includes("basic")) {
+		complexity = "simple";
+	} else if (message.includes("detailed") || message.includes("comprehensive")) {
+		complexity = "complex";
+	}
+
+	const layoutStrategy =
+		intentType === "report" || intentType === "dashboard"
+			? "analytics_dashboard"
+			: intentType === "form"
+			? "input_form"
+			: intentType === "marketing"
+			? "hero_marketing"
+			: intentType === "crud"
+			? "data_management"
+			: "basic";
+
+	return {
+		intentType,
+		domain: "general",
+		complexity,
+		layoutStrategy,
+	};
+}
+
+function buildDomainAnalysisFromReasoning(reasoning: ReasoningOutput): DomainAnalysis {
+	const domainSource =
+		reasoning.domainModel.domainType || reasoning.domainModel.productOrSystem || "general";
+	const domain = slugify(domainSource) || "general";
+
+	return {
+		domain,
+		keyEntities: [...reasoning.entities],
+		inferredIndustry: reasoning.domainModel.domainType,
+		operationalConcepts: [...reasoning.insightsRequired],
+	};
+}
+
+function needsStructuredData(intentType: IntentType): boolean {
+	return intentType === "report" || intentType === "dashboard";
+}
+
+function wantsDataComponents(userMessage: string): boolean {
+	const message = userMessage.toLowerCase();
+	return (
+		message.includes("chart") ||
+		message.includes("graph") ||
+		message.includes("table") ||
+		message.includes("report") ||
+		message.includes("dashboard") ||
+		message.includes("analytics")
+	);
+}
+
+function hashString(value: string): number {
+	let hash = 0;
+	for (let i = 0; i < value.length; i += 1) {
+		hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+	}
+	return hash;
+}
+
+function formatNumber(value: number): string {
+	return value.toLocaleString("en-US");
+}
+
+function buildMetricValue(label: string): string {
+	const lower = label.toLowerCase();
+	const seed = hashString(lower);
+	const base = (seed % 9000) + 100;
+
+	if (/(rate|percent|%)/u.test(lower)) {
+		const percent = ((seed % 450) + 50) / 10;
+		return `${percent.toFixed(1)}%`;
+	}
+
+	if (/(revenue|expense|cost|profit|budget|price|amount|spend)/u.test(lower)) {
+		const dollars = ((seed % 900) + 100) * 1000;
+		return `$${formatNumber(dollars)}`;
+	}
+
+	if (/(time|duration|watch|hours)/u.test(lower)) {
+		const hours = ((seed % 120) + 10).toFixed(0);
+		return `${hours} hrs`;
+	}
+
+	return formatNumber(base);
+}
+
+function buildTableFromName(
+	name: string,
+	index: number,
+	metrics: string[]
+): DataModel["tables"][number] {
+	const base = name.trim() || `table-${index + 1}`;
+	const label = base.replace(/\s+/gu, " ").trim();
+	const id = `table-${slugify(label) || `set-${index + 1}`}`;
+	const columns = [`${label} Item`, "Metric", "Value"];
+	const rows = ["A", "B", "C"].map((suffix, rowIndex) => {
+		const metric = metrics[rowIndex % Math.max(metrics.length, 1)] ?? "Metric";
+		return {
+			[columns[0]]: `${label} ${suffix}`,
+			Metric: metric,
+			Value: buildMetricValue(metric),
+		};
+	});
+
+	return { id, columns, rows };
+}
+
+function buildChartFromName(
+	name: string,
+	index: number
+): DataModel["charts"][number] {
+	const base = name.trim() || `chart-${index + 1}`;
+	const label = base.replace(/\s+/gu, " ").trim();
+	const id = `chart-${slugify(label) || `trend-${index + 1}`}`;
+	const labels = ["Period 1", "Period 2", "Period 3", "Period 4"];
+	const values = labels.map((entry) => (hashString(`${label}-${entry}`) % 80) + 20);
+
+	return { id, type: "line", labels, values };
+}
+
+function synthesizeDataModel(reasoning: ReasoningOutput): DataModel {
+	const metricsSeed = [
+		...reasoning.metricsToTrack,
+		...reasoning.dataModelHints.summaryMetricsNeeded,
+	];
+	const uniqueMetrics = Array.from(new Set(metricsSeed.map((metric) => metric.trim()))).filter(
+		(metric) => metric.length > 0
+	);
+	const metrics = uniqueMetrics.length
+		? uniqueMetrics.map((metric) => ({ label: metric, value: buildMetricValue(metric) }))
+		: [
+			{ label: "Key Metric", value: buildMetricValue("Key Metric") },
+			{ label: "Primary Indicator", value: buildMetricValue("Primary Indicator") },
+			{ label: "Operational Signal", value: buildMetricValue("Operational Signal") },
+		];
+
+	const tables = reasoning.dataModelHints.tablesNeeded.map((table, index) =>
+		buildTableFromName(table, index, uniqueMetrics)
+	);
+	const charts = reasoning.dataModelHints.chartsNeeded.map((chart, index) =>
+		buildChartFromName(chart, index)
+	);
+
+	return { metrics, tables, charts };
+}
+
+function slugify(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/gu, "-")
+		.replace(/^-+|-+$/gu, "")
+		.slice(0, 30) || "item";
+}
+
+function buildFallbackReasoning(userMessage: string): ReasoningOutput {
+	const summary = userMessage
+		.split(/\s+/gu)
+		.slice(0, 6)
+		.join(" ")
+		.trim();
+
+	return {
+		domainModel: {
+			productOrSystem: summary || "Requested UI",
+			domainType: "general",
+			userRole: "user",
+			primaryGoal: "complete the requested task",
+		},
+		entities: [],
+		insightsRequired: [],
+		metricsToTrack: [],
+		dataModelHints: {
+			tablesNeeded: [],
+			chartsNeeded: [],
+			summaryMetricsNeeded: [],
+		},
+	};
+}
+
+function buildTableRows(table: DataModel["tables"][number]): string[][] {
+	return table.rows.map((row) => table.columns.map((column) => String(row[column] ?? "")));
+}
+
+function buildComponentsFromDataModel(
+	dataModel: DataModel,
+	domainAnalysis: DomainAnalysis,
+	reasoning: ReasoningOutput,
+	seedIds?: Set<string>
+): PlanComponent[] {
+	const existingIds = seedIds ?? new Set<string>();
+	const components: PlanComponent[] = [];
+
+	const ensureUniqueId = (base: string) => {
+		let index = 1;
+		let candidate = base;
+		if (existingIds.has(candidate)) {
+			candidate = `${base}-${index}`;
+			while (existingIds.has(candidate)) {
+				index += 1;
+				candidate = `${base}-${index}`;
+			}
+		}
+		existingIds.add(candidate);
+		return candidate;
+	};
+
+	for (const metric of dataModel.metrics) {
+		const id = ensureUniqueId(`metric-${slugify(metric.label)}`);
+		components.push({
+			id,
+			type: "Card",
+			props: { id, title: metric.label, children: metric.value },
+		});
+	}
+
+	for (const table of dataModel.tables) {
+		const id = ensureUniqueId(table.id || `table-${slugify(domainAnalysis.domain)}`);
+		components.push({
+			id,
+			type: "Table",
+			props: { id, columns: table.columns, rows: buildTableRows(table) },
+		});
+	}
+
+	for (const chart of dataModel.charts) {
+		const id = ensureUniqueId(chart.id || `chart-${slugify(domainAnalysis.domain)}`);
+		components.push({
+			id,
+			type: "Chart",
+			props: {
+				id,
+				title: `${
+				reasoning.domainModel.productOrSystem || reasoning.domainModel.domainType
+			} trend`.trim(),
+				data: chart.values,
+			},
+		});
+	}
+
+	if (components.length === 0) {
+		const id = ensureUniqueId("card-1");
+		components.push({
+			id,
+			type: "Card",
+			props: { id, title: "Overview", children: "No data available" },
+		});
+	}
+
+	return components;
+}
+
+function buildLayoutPlan(
+	components: PlanComponent[],
+	dataModel: DataModel
+): LayoutPlan {
+	const sections: LayoutPlan["sections"] = [];
+
+	const metricIds = components
+		.filter((component) => component.type === "Card")
+		.map((component) => component.id);
+	if (metricIds.length > 0) {
+		sections.push({
+			id: "summary-section",
+			type: "metrics",
+			title: "Summary Metrics",
+			purpose: "High-level KPIs for quick health check",
+			components: metricIds,
+		});
+	}
+
+	const tableIds = components
+		.filter((component) => component.type === "Table")
+		.map((component) => component.id);
+	if (tableIds.length > 0) {
+		sections.push({
+			id: "table-section",
+			type: "table",
+			title: "Detailed Table",
+			purpose: "Operational detail and breakdown",
+			components: tableIds,
+		});
+	}
+
+	const chartIds = components
+		.filter((component) => component.type === "Chart")
+		.map((component) => component.id);
+	if (chartIds.length > 0) {
+		sections.push({
+			id: "chart-section",
+			type: "chart",
+			title: "Trend Analysis",
+			purpose: "Visual trend over time",
+			components: chartIds,
+		});
+	}
+
+	if (sections.length === 0 && dataModel.metrics.length === 0) {
+		sections.push({
+			id: "content-section",
+			type: "mixed",
+			title: "Content",
+			purpose: "General layout grouping",
+			components: components.map((component) => component.id),
+		});
+	}
+
+	return { sections };
+}
+
+function isPlaceholderCard(component: PlanComponent): boolean {
+	if (component.type !== "Card") {
+		return false;
+	}
+
+	const title = component.props.title;
+	const children = component.props.children ?? component.props.content;
+	return (
+		typeof title !== "string" ||
+		title.trim().toLowerCase() === "card" ||
+		(children === undefined || String(children).trim().length === 0)
+	);
+}
+
+function isPlaceholderTable(component: PlanComponent): boolean {
+	if (component.type !== "Table") {
+		return false;
+	}
+	const columns = component.props.columns;
+	return (
+		Array.isArray(columns) &&
+		columns.length === 2 &&
+		columns[0] === "Column 1" &&
+		columns[1] === "Column 2"
+	);
+}
+
+function isPlaceholderChart(component: PlanComponent): boolean {
+	if (component.type !== "Chart") {
+		return false;
+	}
+	const title = component.props.title;
+	const data = component.props.data;
+	return (
+		(typeof title !== "string" || title.trim().toLowerCase() === "chart") &&
+		Array.isArray(data) &&
+		data.length === 3 &&
+		data.every((value) => typeof value === "number")
+	);
+}
+
+
+function enrichComponentsWithDataModel(
+	components: PlanComponent[],
+	dataModel: DataModel,
+	domainAnalysis: DomainAnalysis,
+	reasoning: ReasoningOutput
+): PlanComponent[] {
+	const nextComponents = components.map((component) => ({
+		...component,
+		props: { ...component.props },
+	}));
+
+	const existingIds = new Set(nextComponents.map((component) => component.id));
+	const metrics = [...dataModel.metrics];
+	let metricIndex = 0;
+
+	for (const component of nextComponents) {
+		if (component.type === "Card" && metricIndex < metrics.length && isPlaceholderCard(component)) {
+			const metric = metrics[metricIndex++];
+			component.props.title = metric.label;
+			component.props.children = metric.value;
+		}
+	}
+
+	while (metricIndex < metrics.length) {
+		const metric = metrics[metricIndex++];
+		const id = `metric-${slugify(metric.label)}`;
+		const uniqueId = existingIds.has(id) ? `${id}-${metricIndex}` : id;
+		existingIds.add(uniqueId);
+		nextComponents.push({
+			id: uniqueId,
+			type: "Card",
+			props: { id: uniqueId, title: metric.label, children: metric.value },
+		});
+	}
+
+	const primaryTable = dataModel.tables[0];
+	if (primaryTable) {
+		const tableComponent = nextComponents.find((component) => component.type === "Table");
+		if (tableComponent) {
+			if (isPlaceholderTable(tableComponent) || !tableComponent.props.columns) {
+				tableComponent.props.columns = primaryTable.columns;
+				tableComponent.props.rows = buildTableRows(primaryTable);
+			}
+		} else {
+			const id = primaryTable.id || `table-${slugify(domainAnalysis.domain)}`;
+			const uniqueId = existingIds.has(id) ? `${id}-1` : id;
+			existingIds.add(uniqueId);
+			nextComponents.push({
+				id: uniqueId,
+				type: "Table",
+				props: { id: uniqueId, columns: primaryTable.columns, rows: buildTableRows(primaryTable) },
+			});
+		}
+	}
+
+	const primaryChart = dataModel.charts[0];
+	if (primaryChart) {
+		const chartComponent = nextComponents.find((component) => component.type === "Chart");
+		if (chartComponent) {
+			if (isPlaceholderChart(chartComponent) || !chartComponent.props.data) {
+				chartComponent.props.title = `${
+					reasoning.domainModel.productOrSystem || reasoning.domainModel.domainType
+				} trend`.trim();
+				chartComponent.props.data = primaryChart.values;
+			}
+		} else {
+			const id = primaryChart.id || `chart-${slugify(domainAnalysis.domain)}`;
+			const uniqueId = existingIds.has(id) ? `${id}-1` : id;
+			existingIds.add(uniqueId);
+			nextComponents.push({
+				id: uniqueId,
+				type: "Chart",
+				props: {
+					id: uniqueId,
+					title: `${
+						reasoning.domainModel.productOrSystem || reasoning.domainModel.domainType
+					} trend`.trim(),
+					data: primaryChart.values,
+				},
+			});
+		}
+	}
+
+	return nextComponents;
+}
+
+const marketingMetricTokens = ["ctr", "cpc", "impressions", "conversions", "click", "ad", "campaign"];
+
+function tokenize(value: string): string[] {
+	return value
+		.toLowerCase()
+		.split(/[^a-z0-9]+/gu)
+		.filter((token) => token.length > 0);
+}
+
+function hasMarketingMetrics(metrics: DataModel["metrics"]): boolean {
+	return metrics.some((metric) =>
+		marketingMetricTokens.some((token) => metric.label.toLowerCase().includes(token))
+	);
+}
+
+function isLikelyMarketingDomain(reasoning: ReasoningOutput): boolean {
+	const text = `${reasoning.domainModel.productOrSystem} ${reasoning.domainModel.domainType}`.toLowerCase();
+	return /(marketing|ads|advertising|campaign)/u.test(text);
+}
+
+export function isDataModelAlignedWithReasoning(
+	reasoning: ReasoningOutput,
+	dataModel: DataModel
+): boolean {
+	if (!dataModel.metrics.length) {
+		return true;
+	}
+
+	const requiredTokens = new Set<string>();
+	for (const entry of [
+		...reasoning.metricsToTrack,
+		...reasoning.dataModelHints.summaryMetricsNeeded,
+		...reasoning.entities,
+		...reasoning.insightsRequired,
+	]) {
+		for (const token of tokenize(entry)) {
+			requiredTokens.add(token);
+		}
+	}
+
+	const metricTokens = dataModel.metrics.flatMap((metric) => tokenize(metric.label));
+	const overlaps = metricTokens.some((token) => requiredTokens.has(token));
+
+	if (requiredTokens.size > 0 && !overlaps) {
+		return false;
+	}
+
+	if (!isLikelyMarketingDomain(reasoning) && hasMarketingMetrics(dataModel.metrics)) {
+		return false;
+	}
+
+	return true;
+}
+
+function buildHeuristicPlan(
+	userMessage: string,
+	reasoning: ReasoningOutput,
+	previousPlan?: Plan | null
+): Plan {
+	const message = userMessage.toLowerCase();
 	const type: PlanType = previousPlan ? "modify" : "new";
+	const domainAnalysis =
+		previousPlan?.domainAnalysis ?? buildDomainAnalysisFromReasoning(reasoning);
+	const intentAnalysis = previousPlan?.intentAnalysis ?? inferIntentAnalysis(userMessage);
+	intentAnalysis.domain = domainAnalysis.domain;
+	const dataModel =
+		previousPlan?.dataModel ??
+		(needsStructuredData(intentAnalysis.intentType)
+			? synthesizeDataModel(reasoning)
+			: { metrics: [], tables: [], charts: [] });
+	const layout = intentAnalysis.layoutStrategy;
 
 	const components: PlanComponent[] = [];
 	const changes: PlanChange[] = [];
@@ -110,6 +652,17 @@ function buildHeuristicPlan(userMessage: string, previousPlan?: Plan | null): Pl
 				props: buildDefaultProps("Card", id),
 			});
 		}
+
+		if (needsStructuredData(intentAnalysis.intentType)) {
+			const enriched = enrichComponentsWithDataModel(
+				components,
+				dataModel,
+				domainAnalysis,
+				reasoning
+			);
+			components.length = 0;
+			components.push(...enriched);
+		}
 	} else {
 		components.push(...previousPlan.components.map((component) => ({
 			...component,
@@ -147,11 +700,18 @@ function buildHeuristicPlan(userMessage: string, previousPlan?: Plan | null): Pl
 		}
 	}
 
+	const layoutPlan = buildLayoutPlan(components, dataModel);
+
 	return {
 		type,
 		layout,
 		components,
 		changes,
+		intentAnalysis,
+		domainAnalysis,
+		reasoning,
+		dataModel,
+		layoutPlan,
 	};
 }
 
@@ -267,11 +827,22 @@ function normalizePlan(value: unknown): Plan | null {
 				.filter((change): change is NonNullable<typeof change> => change !== null)
 		: [];
 
+	const intentAnalysis = normalizeIntentAnalysis(candidate.intentAnalysis);
+	const domainAnalysis = normalizeDomainAnalysis(candidate.domainAnalysis);
+	const reasoning = normalizeReasoningOutput(candidate.reasoning);
+	const dataModel = normalizeDataModel(candidate.dataModel);
+	const layoutPlan = normalizeLayoutPlan(candidate.layoutPlan);
+
 	return {
 		type: candidate.type,
 		layout: candidate.layout,
 		components,
 		changes,
+		intentAnalysis: intentAnalysis ?? undefined,
+		domainAnalysis: domainAnalysis ?? undefined,
+		reasoning: reasoning ?? undefined,
+		dataModel: dataModel ?? undefined,
+		layoutPlan: layoutPlan ?? undefined,
 	};
 }
 
@@ -289,6 +860,200 @@ function normalizeComponentType(rawType: unknown): PlanComponent["type"] | null 
 	);
 
 	return match ?? null;
+}
+
+function isIntentType(value: unknown): value is IntentType {
+	return (
+		value === "report" ||
+		value === "dashboard" ||
+		value === "form" ||
+		value === "marketing" ||
+		value === "marketing_page" ||
+		value === "crud"
+	);
+}
+
+function isLayoutSectionType(value: unknown): value is LayoutSectionType {
+	return value === "metrics" || value === "table" || value === "chart" || value === "mixed";
+}
+
+function normalizeIntentAnalysis(value: unknown): IntentAnalysis | null {
+	if (!isRecord(value)) {
+		return null;
+	}
+
+	const intentType = isIntentType(value.intentType) ? value.intentType : null;
+	const domain = typeof value.domain === "string" ? value.domain : null;
+	const complexity =
+		value.complexity === "simple" || value.complexity === "moderate" || value.complexity === "complex"
+			? value.complexity
+			: null;
+	const layoutStrategy = typeof value.layoutStrategy === "string" ? value.layoutStrategy : null;
+
+	if (!intentType || !domain || !complexity || !layoutStrategy) {
+		return null;
+	}
+
+	return { intentType, domain, complexity, layoutStrategy };
+}
+
+function normalizeDomainAnalysis(value: unknown): DomainAnalysis | null {
+	if (!isRecord(value)) {
+		return null;
+	}
+
+	const domain = typeof value.domain === "string" ? value.domain : null;
+	const keyEntities = Array.isArray(value.keyEntities)
+		? value.keyEntities.filter((entry) => typeof entry === "string")
+		: [];
+	const inferredIndustry =
+		typeof value.inferredIndustry === "string" ? value.inferredIndustry : null;
+	const operationalConcepts = Array.isArray(value.operationalConcepts)
+		? value.operationalConcepts.filter((entry) => typeof entry === "string")
+		: [];
+
+	if (!domain || !inferredIndustry) {
+		return null;
+	}
+
+	return {
+		domain,
+		keyEntities,
+		inferredIndustry,
+		operationalConcepts,
+	};
+}
+
+function normalizeDataModel(value: unknown): DataModel | null {
+	if (!isRecord(value)) {
+		return null;
+	}
+
+	const metrics = Array.isArray(value.metrics)
+		? value.metrics
+				.filter((metric) => isRecord(metric))
+				.map((metric) => ({
+					label: typeof metric.label === "string" ? metric.label : "",
+					value: typeof metric.value === "string" ? metric.value : "",
+				}))
+				.filter((metric) => metric.label && metric.value)
+		: [];
+
+	const tables = Array.isArray(value.tables)
+		? value.tables
+				.filter((table) => isRecord(table))
+				.map((table) => ({
+					id: typeof table.id === "string" ? table.id : "",
+					columns: Array.isArray(table.columns)
+						? table.columns.filter((entry) => typeof entry === "string")
+						: [],
+					rows: Array.isArray(table.rows)
+						? table.rows.filter((row) => isRecord(row))
+						: [],
+				}))
+				.filter((table) => table.id && table.columns.length > 0)
+		: [];
+
+	const charts = Array.isArray(value.charts)
+		? value.charts
+				.filter((chart) => isRecord(chart))
+				.map((chart) => ({
+					id: typeof chart.id === "string" ? chart.id : "",
+					type: chart.type === "line" || chart.type === "bar" ? chart.type : "line",
+					labels: Array.isArray(chart.labels)
+						? chart.labels.filter((entry) => typeof entry === "string")
+						: [],
+					values: Array.isArray(chart.values)
+						? chart.values.filter((entry) => typeof entry === "number")
+						: [],
+				}))
+				.filter((chart) => chart.id && chart.values.length > 0)
+		: [];
+
+	return { metrics, tables, charts };
+}
+
+function normalizeLayoutPlan(value: unknown): LayoutPlan | null {
+	if (!isRecord(value)) {
+		return null;
+	}
+
+	const sections = Array.isArray(value.sections)
+		? value.sections
+				.filter((section) => isRecord(section))
+				.map((section) => ({
+					id: typeof section.id === "string" ? section.id : "",
+					type: isLayoutSectionType(section.type) ? section.type : "mixed",
+					title: typeof section.title === "string" ? section.title : undefined,
+					purpose: typeof section.purpose === "string" ? section.purpose : undefined,
+					components: Array.isArray(section.components)
+						? section.components.filter((entry) => typeof entry === "string")
+						: [],
+				}))
+				.filter((section) => section.id)
+		: [];
+
+	return { sections };
+}
+
+function normalizeReasoningOutput(value: unknown): ReasoningOutput | null {
+	if (!isRecord(value)) {
+		return null;
+	}
+
+	const domainModel = value.domainModel;
+	if (!isRecord(domainModel)) {
+		return null;
+	}
+
+	const productOrSystem =
+		typeof domainModel.productOrSystem === "string" ? domainModel.productOrSystem : null;
+	const domainType = typeof domainModel.domainType === "string" ? domainModel.domainType : null;
+	const userRole = typeof domainModel.userRole === "string" ? domainModel.userRole : null;
+	const primaryGoal =
+		typeof domainModel.primaryGoal === "string" ? domainModel.primaryGoal : null;
+
+	if (!productOrSystem || !domainType || !userRole || !primaryGoal) {
+		return null;
+	}
+
+	const dataModelHints = value.dataModelHints;
+	if (!isRecord(dataModelHints)) {
+		return null;
+	}
+
+	const tablesNeeded = Array.isArray(dataModelHints.tablesNeeded)
+		? dataModelHints.tablesNeeded.filter((entry) => typeof entry === "string")
+		: [];
+	const chartsNeeded = Array.isArray(dataModelHints.chartsNeeded)
+		? dataModelHints.chartsNeeded.filter((entry) => typeof entry === "string")
+		: [];
+	const summaryMetricsNeeded = Array.isArray(dataModelHints.summaryMetricsNeeded)
+		? dataModelHints.summaryMetricsNeeded.filter((entry) => typeof entry === "string")
+		: [];
+
+	return {
+		domainModel: {
+			productOrSystem,
+			domainType,
+			userRole,
+			primaryGoal,
+		},
+		entities: Array.isArray(value.entities)
+			? value.entities.filter((entry) => typeof entry === "string")
+			: [],
+		insightsRequired: Array.isArray(value.insightsRequired)
+			? value.insightsRequired.filter((entry) => typeof entry === "string")
+			: [],
+		metricsToTrack: Array.isArray(value.metricsToTrack)
+			? value.metricsToTrack.filter((entry) => typeof entry === "string")
+			: [],
+		dataModelHints: {
+			tablesNeeded,
+			chartsNeeded,
+			summaryMetricsNeeded,
+		},
+	};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -600,21 +1365,135 @@ export async function runPlanner(
 	client: AgentClient,
 	request: PlannerRequest
 ): Promise<PlannerResult> {
-	const prompt = buildPlannerPrompt(request.userMessage, request.previousPlan);
+	const reasoning =
+		request.reasoning ?? request.previousPlan?.reasoning ?? buildFallbackReasoning(request.userMessage);
+	const prompt = buildPlannerPrompt(request.userMessage, request.previousPlan, reasoning);
+	const sparseRetryPrompt = buildPlannerPrompt(
+		request.userMessage,
+		request.previousPlan,
+		reasoning,
+		"Return at least 4 components across multiple sections. Avoid placeholder titles like \"Card\"."
+	);
+
+	const isSparsePlan = (plan: Plan) => {
+		const intent = plan.intentAnalysis;
+		if (!intent) {
+			return false;
+		}
+		if (needsStructuredData(intent.intentType) || wantsDataComponents(request.userMessage)) {
+			return false;
+		}
+		const meaningful = plan.components.filter((component) => {
+			if (component.type === "Card") {
+				return !isPlaceholderCard(component);
+			}
+			return true;
+		});
+		return meaningful.length < 3;
+	};
+
+	const finalizePlan = (plan: Plan): Plan => {
+		const resolvedReasoning = plan.reasoning ?? reasoning;
+		const inferredDomain =
+			plan.domainAnalysis ??
+			request.previousPlan?.domainAnalysis ??
+			buildDomainAnalysisFromReasoning(resolvedReasoning);
+		const inferredIntent =
+			plan.intentAnalysis ??
+			request.previousPlan?.intentAnalysis ??
+			inferIntentAnalysis(request.userMessage);
+		inferredIntent.domain = inferredDomain.domain;
+
+		const candidateDataModel =
+			plan.dataModel ??
+			request.previousPlan?.dataModel ??
+			(needsStructuredData(inferredIntent.intentType)
+				? synthesizeDataModel(resolvedReasoning)
+				: { metrics: [], tables: [], charts: [] });
+
+		const dataModel =
+			needsStructuredData(inferredIntent.intentType) &&
+			!isDataModelAlignedWithReasoning(resolvedReasoning, candidateDataModel)
+				? synthesizeDataModel(resolvedReasoning)
+				: candidateDataModel;
+
+		let components = plan.components;
+		if (
+			(plan.type === "new" || plan.type === "regenerate") &&
+			needsStructuredData(inferredIntent.intentType)
+		) {
+			components = components.length
+				? enrichComponentsWithDataModel(
+					components,
+					dataModel,
+					inferredDomain,
+					resolvedReasoning
+				)
+				: buildComponentsFromDataModel(dataModel, inferredDomain, resolvedReasoning);
+		}
+
+		if (!needsStructuredData(inferredIntent.intentType) && !wantsDataComponents(request.userMessage)) {
+			components = components.filter(
+				(component) => component.type !== "Chart" && component.type !== "Table"
+			);
+			dataModel.metrics = [];
+			dataModel.tables = [];
+			dataModel.charts = [];
+		}
+
+		if (!needsStructuredData(inferredIntent.intentType)) {
+			components = components.filter((component) => {
+				if (component.type === "Card") {
+					return !isPlaceholderCard(component);
+				}
+				return true;
+			});
+		}
+
+		const layoutPlan =
+			plan.layoutPlan ??
+			request.previousPlan?.layoutPlan ??
+			buildLayoutPlan(components, dataModel);
+
+		return {
+			...plan,
+			layout: plan.layout || inferredIntent.layoutStrategy,
+			components,
+			intentAnalysis: inferredIntent,
+			domainAnalysis: inferredDomain,
+			reasoning: resolvedReasoning,
+			dataModel,
+			layoutPlan,
+		};
+	};
 
 	let raw = await client.complete(prompt);
 	try {
-		return { plan: parsePlan(raw), raw };
+		let plan = finalizePlan(parsePlan(raw));
+		if (isSparsePlan(plan)) {
+			raw = await client.complete(sparseRetryPrompt);
+			plan = finalizePlan(parsePlan(raw));
+		}
+		return { plan, raw };
 	} catch (error) {
 		if (error instanceof PlannerError) {
 			if (error.code === "invalid_json" || error.code === "invalid_plan") {
 				raw = await client.complete(prompt);
 				try {
-					return { plan: parsePlan(raw), raw };
+					let plan = finalizePlan(parsePlan(raw));
+					if (isSparsePlan(plan)) {
+						raw = await client.complete(sparseRetryPrompt);
+						plan = finalizePlan(parsePlan(raw));
+					}
+					return { plan, raw };
 				} catch (retryError) {
 					if (retryError instanceof PlannerError && retryError.code === "invalid_plan") {
 						return {
-							plan: buildHeuristicPlan(request.userMessage, request.previousPlan ?? null),
+							plan: buildHeuristicPlan(
+								request.userMessage,
+								reasoning,
+								request.previousPlan ?? null
+							),
 							raw,
 						};
 					}

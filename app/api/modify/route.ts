@@ -1,13 +1,18 @@
 import { NextResponse } from "next/server";
 import type { Plan } from "../../../types/plan";
-import { applyPlanChanges, runPlanner, PlannerError } from "../../../lib/agent/planner";
+import {
+	applyPlanChanges,
+	runPlanner,
+	PlannerError,
+	isDataModelAlignedWithReasoning,
+} from "../../../lib/agent/planner";
 import { buildDeterministicJsx, runGenerator } from "../../../lib/agent/generator";
-import { runExplainer } from "../../../lib/agent/explainer";
 import { validateJsx } from "../../../lib/validation/jsxValidator";
 import { addVersion, getCurrentVersionIndex } from "../../../lib/version/versionManager";
 import { getChangedComponentIds } from "../../../lib/version/diff";
 import { createOpenAIClient } from "../../../lib/agent/client";
 import { validatePromptSafety } from "../../../lib/validation/promptValidator";
+import { runReasoning } from "../../../lib/agent/reasoning";
 
 interface ModifyRequest {
 	userMessage: string;
@@ -88,10 +93,35 @@ export async function POST(request: Request) {
 	const client = getAgentClient();
 
 	try {
-		const plannerResult = await runPlanner(client, {
+		let reasoningResult = await runReasoning(
+			client,
+			payload.userMessage,
+			payload.currentVersion.plan.reasoning ?? null
+		);
+		let plannerResult = await runPlanner(client, {
 			userMessage: payload.userMessage,
 			previousPlan: payload.currentVersion.plan,
+			reasoning: reasoningResult.reasoning,
 		});
+
+		if (
+			plannerResult.plan.dataModel &&
+			!isDataModelAlignedWithReasoning(
+				reasoningResult.reasoning,
+				plannerResult.plan.dataModel
+			)
+		) {
+			reasoningResult = await runReasoning(
+				client,
+				payload.userMessage,
+				reasoningResult.reasoning
+			);
+			plannerResult = await runPlanner(client, {
+				userMessage: payload.userMessage,
+				previousPlan: payload.currentVersion.plan,
+				reasoning: reasoningResult.reasoning,
+			});
+		}
 		const plannerPlan =
 			plannerResult.plan.type === "modify"
 				? plannerResult.plan
@@ -136,16 +166,12 @@ export async function POST(request: Request) {
 			}
 		}
 
-		const explainerResult = await runExplainer(
-			client,
-			resolvedPlan,
-			generatorResult.code
-		);
+		const explanation = "";
 
 		const version = addVersion({
 			plan: resolvedPlan,
 			code: generatorResult.code,
-			explanation: explainerResult.explanation,
+			explanation,
 		});
 
 		const previousPlan = payload.currentVersion.plan;
@@ -161,7 +187,7 @@ export async function POST(request: Request) {
 				},
 				plan: resolvedPlan,
 				code: generatorResult.code,
-				explanation: explainerResult.explanation,
+				explanation,
 				validation: {
 					componentCheck: validation.componentCheck,
 					propCheck: validation.propCheck,
